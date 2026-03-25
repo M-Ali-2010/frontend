@@ -1791,22 +1791,29 @@ const Wallet = {
   },
 
   // Fetches SOL balance from RPC for UI display ONLY
-  async _fetchDisplayBalance() {
-    const conn = getConnection();
-    if (!conn || !solanaWeb3 || !AppState.user.address) return;
-    try {
-      const pk = new window.solanaWeb3.PublicKey(AppState.user.address);
-      const lamports = await conn.getBalance(pk, 'confirmed');
-      // Only update UI display — backend balance is authoritative for bet validation
-      const solBalance = Number(lamports) / 1e9;
-      // Update display only if backend hasn't provided a value
-      if (AppState.user.balance === 0) {
-        AppState.user.balance = solBalance;
-        UI.renderStats();
-      }
-    } catch (_) {}
-  },
+async _fetchDisplayBalance() {
+  const conn = getConnection();
+  if (!conn || !window.solanaWeb3 || !AppState.user.address) return;
 
+  try {
+    const pk = new window.solanaWeb3.PublicKey(AppState.user.address);
+    const lamports = await conn.getBalance(pk, 'confirmed');
+
+    const solBalance = Number(lamports) / 1e9;
+
+    // ✅ ВСЕГДА обновляем UI баланс (display only)
+    AppState.user.displayBalance = solBalance;
+
+    // ❗ backend баланс главный — НЕ трогаем его
+    // только отображаем отдельно
+
+    UI.renderStats();
+    UI.renderRightPanel();
+
+  } catch (e) {
+    console.warn('Balance fetch error:', e);
+  }
+},
   _updateUI(connected) {
     const btn = document.getElementById('walletBtn');
     const addr = AppState.user.address;
@@ -1828,7 +1835,7 @@ const Wallet = {
   disconnect() {
     try { this.phantom?.disconnect(); } catch (_) {}
     AppState.user.address = null;
-    AppState.user.balance = 0;
+    AppState.user.displayBalance = 0;
     AppState.wallet.connected = false;
     AppState.wallet.transactions = [];
     AppState.bets = [];
