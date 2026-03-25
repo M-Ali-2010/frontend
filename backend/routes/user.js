@@ -30,6 +30,8 @@ router.get('/', authMiddleware, async (req, res) => {
         roles: user.roles || ['user'],
         balanceLamports: user.balanceLamports || '0',
         balanceSol: lamportsToSol(user.balanceLamports || '0'),
+        chainBalanceLamports: user.chainBalanceLamports || '0',
+        chainBalanceSol: lamportsToSol(user.chainBalanceLamports || '0'),
       },
     });
   } catch (e) {

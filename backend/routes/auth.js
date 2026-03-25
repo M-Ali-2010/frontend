@@ -11,6 +11,9 @@ const connection = new Connection(process.env.SOLANA_RPC_URL, 'confirmed');
 
 router.post('/connect', async (req, res) => {
   try {
+    if (!process.env.JWT_SECRET) return res.status(500).json({ error: 'JWT_SECRET not set' });
+    if (!process.env.SOLANA_RPC_URL) return res.status(500).json({ error: 'SOLANA_RPC_URL not set' });
+
     const wallet = req.body?.wallet;
     if (!wallet || typeof wallet !== 'string') {
       return res.status(400).json({ error: 'wallet required' });
@@ -25,10 +28,10 @@ router.post('/connect', async (req, res) => {
 
     const walletStr = pk.toString();
 
-    // 🔥 получаем баланс из blockchain
-    let lamports = 0;
+    // blockchain balance (display-only)
+    let chainLamports = 0;
     try {
-      lamports = await connection.getBalance(pk);
+      chainLamports = await connection.getBalance(pk);
     } catch (e) {
       console.error('[balance error]', e.message);
     }
@@ -38,12 +41,14 @@ router.post('/connect', async (req, res) => {
     if (!user) {
       user = await User.create({
         wallet: walletStr,
-        balanceLamports: lamports.toString(),
+        balanceLamports: chainLamports.toString(),
+        chainBalanceLamports: chainLamports.toString(),
+        chainBalanceUpdatedAt: new Date(),
         roles: ['user'],
       });
     } else {
-      // 🔥 обновляем баланс при каждом входе
-      user.balanceLamports = lamports.toString();
+      user.chainBalanceLamports = chainLamports.toString();
+      user.chainBalanceUpdatedAt = new Date();
       await user.save();
     }
 
@@ -58,6 +63,7 @@ router.post('/connect', async (req, res) => {
       user: {
         wallet: user.wallet,
         balanceLamports: user.balanceLamports,
+        chainBalanceLamports: user.chainBalanceLamports,
       },
     });
 

@@ -120,11 +120,6 @@ router.post('/bet', authMiddleware, async (req, res) => {
     const amountLamports = solToLamports(amount);
     if (amountLamports <= 0n) return res.status(400).json({ error: 'amount must be > 0' });
 
-    const market = await Market.findById(marketId);
-    if (!market) return res.status(404).json({ error: 'Market not found' });
-    if (market.resolved) return res.status(400).json({ error: 'Market resolved' });
-    if (market.endsAt.getTime() <= Date.now()) return res.status(400).json({ error: 'Market ended' });
-
     // Idempotency: if same clientBetId -> return existing bet
     const existing = await Bet.findOne({ marketId, userWallet, clientBetId });
     if (existing) {
@@ -133,15 +128,21 @@ router.post('/bet', authMiddleware, async (req, res) => {
 
     // Atomic-ish via session transaction (consistent balance/pools)
     const session = await mongoose.startSession();
-    await session.withTransaction(async () => {
+    try {
+      await session.withTransaction(async () => {
       const user = await User.findOne({ wallet: userWallet }).session(session);
       if (!user) throw new Error('User not found');
 
       const userBal = BigInt(user.balanceLamports);
       if (userBal < amountLamports) throw new Error('INSUFFICIENT_BALANCE');
 
+      const market = await Market.findById(marketId).session(session);
+      if (!market) throw new Error('MARKET_NOT_FOUND');
+      if (market.resolved) throw new Error('MARKET_RESOLVED');
+      if (market.endsAt.getTime() <= Date.now()) throw new Error('MARKET_ENDED');
+
       // participant count: increment if this is first bet from this wallet in this market
-      const hadAnyBet = await Bet.exists({ marketId, userWallet });
+      const hadAnyBet = await Bet.exists({ marketId, userWallet }).session(session);
 
       // Update pools
       const yesPool = BigInt(market.yesPoolLamports);
@@ -175,7 +176,10 @@ router.post('/bet', authMiddleware, async (req, res) => {
         }],
         { session }
       );
-    });
+      });
+    } finally {
+      await session.endSession();
+    }
 
     // Fetch the created bet (best-effort)
     const bet = await Bet.findOne({ marketId, userWallet, clientBetId }).lean();
@@ -205,6 +209,9 @@ router.post('/bet', authMiddleware, async (req, res) => {
     const msg = e?.message || String(e);
 
     if (msg === 'INSUFFICIENT_BALANCE') return res.status(400).json({ error: 'INSUFFICIENT_BALANCE' });
+    if (msg === 'MARKET_NOT_FOUND') return res.status(404).json({ error: 'Market not found' });
+    if (msg === 'MARKET_RESOLVED') return res.status(400).json({ error: 'Market resolved' });
+    if (msg === 'MARKET_ENDED') return res.status(400).json({ error: 'Market ended' });
     return res.status(500).json({ error: 'MARKET_BET_FAILED', detail: msg });
   }
 });
@@ -265,7 +272,7 @@ router.post('/resolve', authMiddleware, adminMiddleware, async (req, res) => {
         const payout = payoutForBet.get(b._id.toString()) || 0n;
         const isWinner = b.side === resultSide;
 
-        b.status = payout > 0n ? 'PAYOUT_PAID' : (isWinner ? 'LOST' : 'LOST');
+        b.status = payout > 0n ? 'PAYOUT_PAID' : 'LOST';
         b.payoutLamports = bigToStr(payout);
         b.resolvedAt = new Date();
         await b.save({ session });

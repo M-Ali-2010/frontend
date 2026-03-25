@@ -369,7 +369,6 @@ a { color: inherit; text-decoration: none; }
   font-size: 18px;
   box-shadow: 0 0 20px rgba(124,107,255,0.35);
 }
-.hero-addr-block {}
 .hero-status { display: flex; align-items: center; gap: 5px; margin-bottom: 3px; }
 .hero-status-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); animation: pulse 1.8s infinite; }
 .hero-status-label { font-size: 10px; font-family: var(--font-mono); color: var(--green); letter-spacing: 0.05em; }
@@ -1184,12 +1183,6 @@ a { color: inherit; text-decoration: none; }
         <div id="tokenPricesList"></div>
       </div>
 
-      <!-- Transactions -->
-      <div class="panel-block" id="txBlock" style="display:none">
-        <div class="panel-label">Recent Transactions</div>
-        <div id="txList"></div>
-      </div>
-
       <!-- Order Book -->
       <div class="panel-block">
         <div class="panel-label">Order Book — <span id="obLabel" style="color:var(--text-secondary)">—</span></div>
@@ -1267,10 +1260,9 @@ a { color: inherit; text-decoration: none; }
       <div class="payout-value" id="payoutDisplay">—</div>
     </div>
     <div class="tx-progress" id="txProgress">
-      <div class="tx-step" id="txStep1"><span class="tx-step-ic">○</span> Signing transaction…</div>
-      <div class="tx-step" id="txStep2"><span class="tx-step-ic">○</span> Broadcasting to Solana…</div>
-      <div class="tx-step" id="txStep3"><span class="tx-step-ic">○</span> Confirming on-chain…</div>
-      <div class="tx-hash-out" id="txHashDisplay" style="display:none"></div>
+      <div class="tx-step" id="txStep1"><span class="tx-step-ic">○</span> Sending bet to backend…</div>
+      <div class="tx-step" id="txStep2"><span class="tx-step-ic">○</span> Updating markets…</div>
+      <div class="tx-step" id="txStep3"><span class="tx-step-ic">○</span> Done</div>
     </div>
     <div class="modal-actions">
       <button class="btn-cancel" onclick="BetModal.close()">Cancel</button>
@@ -1289,7 +1281,6 @@ a { color: inherit; text-decoration: none; }
 ═══════════════════════════════════════════════════════════ */
 const solanaWeb3 = window.solanaWeb3;
 const provider = window.solana;
-const PLATFORM_WALLET = window.PLATFORM_WALLET || 'PUT_REAL_ADDRESS_HERE';
 const connection = solanaWeb3 ? new solanaWeb3.Connection(solanaWeb3.clusterApiUrl('mainnet-beta'), 'confirmed') : null;
 const { PublicKey, LAMPORTS_PER_SOL } = solanaWeb3 || {};
 
@@ -1331,7 +1322,7 @@ async function ensureSocket() {
   if (socket) return socket;
   await loadScript('https://cdn.socket.io/4.7.2/socket.io.min.js');
   if (!window.io) throw new Error('Socket.IO not available');
-  socket = window.io(SOCKET_URL, { transports: ['websocket'] });
+  socket = window.io(SOCKET_URL, { transports: ['websocket','polling'], reconnection: true, reconnectionAttempts: 20, reconnectionDelay: 400, timeout: 10000 });
   socket.on('market_created', ()=>refreshMarkets().catch(()=>{}));
   socket.on('new_market', ()=>refreshMarkets().catch(()=>{}));
   socket.on('market_updated', ()=>refreshMarkets().catch(()=>{}));
@@ -1355,7 +1346,7 @@ function lamportsToSolNumber(lamports) {
   const fs=frac.toString().padStart(9,'0').replace(/0+$/,'');
   return fs ? Number(`${whole}.${fs}`) : Number(whole.toString());
 }
-async function getBalanceSol() {
+async function getChainBalanceSol() {
   if (!provider?.publicKey||!connection) return 0;
   const lamports = await connection.getBalance(new PublicKey(provider.publicKey.toString()),'confirmed');
   return Number(lamports)/1e9;
@@ -1378,24 +1369,16 @@ async function fetchTokenPrices(symbols=['solana']) {
     return data;
   } catch(e) { return {}; }
 }
-async function sendSol(amountSol, memoText) {
-  if (!provider?.isPhantom||!provider?.publicKey) throw new Error('Phantom wallet not connected');
-  if (!connection) throw new Error('Solana connection not initialized');
-  if (!PLATFORM_WALLET||PLATFORM_WALLET==='PUT_REAL_ADDRESS_HERE') throw new Error('Set PLATFORM_WALLET to real address');
-  const toPubkey = new PublicKey(PLATFORM_WALLET);
-  const lamports = solToLamports(amountSol);
-  const memoProgramId = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
-  const tx = new solanaWeb3.Transaction();
-  tx.add(solanaWeb3.SystemProgram.transfer({ fromPubkey: provider.publicKey, toPubkey, lamports: Number(lamports) }));
-  if (typeof memoText==='string'&&memoText.trim().length>0)
-    tx.add(new solanaWeb3.TransactionInstruction({ keys:[], programId:memoProgramId, data:new TextEncoder().encode(memoText.trim()) }));
-  tx.feePayer = provider.publicKey;
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
-  tx.recentBlockhash = blockhash;
-  const signed = await provider.signTransaction(tx);
-  const signature = await connection.sendRawTransaction(signed.serialize());
-  await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
-  return signature;
+
+async function fetchSolanaTokenPricesByMints(mints) {
+  try {
+    const list = Array.from(new Set((mints||[]).map(x=>String(x||'').trim()).filter(Boolean))).slice(0, 100);
+    if (!list.length) return {};
+    const qs = encodeURIComponent(list.join(','));
+    const res = await fetch(`https://api.coingecko.com/api/v3/simple/token_price/solana?contract_addresses=${qs}&vs_currencies=usd`);
+    const data = await res.json();
+    return data && typeof data === 'object' ? data : {};
+  } catch(e) { return {}; }
 }
 function fmtVol(v) {
   if(v>=1e6) return '$'+(v/1e6).toFixed(2)+'M';
@@ -1413,16 +1396,32 @@ function capitalize(s) { return s.charAt(0).toUpperCase()+s.slice(1); }
 function sleep(ms) { return new Promise(r=>setTimeout(r,ms)); }
 function generateId() { return (crypto?.randomUUID?crypto.randomUUID():Date.now()+Math.random()).toString(); }
 
+function animateNumber(el, to, { from=undefined, durationMs=650, decimals=3, prefix='', suffix='' } = {}) {
+  if (!el) return;
+  const start = (from !== undefined) ? Number(from) : Number(el.dataset.lastValue ?? 0);
+  const end = Number(to);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) { el.textContent = `${prefix}${to}${suffix}`; return; }
+  const t0 = performance.now();
+  const ease = (t) => 1 - Math.pow(1 - t, 3);
+  function tick(now) {
+    const p = Math.min(1, (now - t0) / durationMs);
+    const v = start + (end - start) * ease(p);
+    el.textContent = `${prefix}${v.toFixed(decimals)}${suffix}`;
+    if (p < 1) requestAnimationFrame(tick);
+    else el.dataset.lastValue = String(end);
+  }
+  requestAnimationFrame(tick);
+}
+
 /* ═══════════════════════════════════════════════════════════
    APP STATE
 ═══════════════════════════════════════════════════════════ */
 const AppState = {
-  user: { address:null, balance:0, totalWagered:0, totalPnl:0, winRate:0 },
-  wallet: { connected:false, transactions:[] },
+  user: { address:null, balance:0, chainBalance:0, totalWagered:0, totalPnl:0, winRate:0 },
+  wallet: { connected:false },
   markets: [], bets: [], activity: [],
-  splTokens: [], tokenPrices: {},
+  splTokens: [], tokenPrices: {}, tokenMintPrices: {},
   ui: { currentView:'markets', currentFilter:'all', currentSort:'volume', selectedMarketId:null, whaleCount:0 },
-  addTransaction(tx) { this.wallet.transactions.unshift(tx); this.wallet.transactions=this.wallet.transactions.slice(0,10); },
   addActivity(item) { this.activity.unshift(item); this.activity=this.activity.slice(0,40); },
   recomputeUserStats() {
     const mine=this.bets.filter(b=>b.wallet===this.user.address);
@@ -1479,7 +1478,13 @@ async function refreshMarkets() {
 }
 async function refreshPortfolio() {
   if(!JWT_TOKEN||!AppState.user.address) return;
-  try { const ud=await apiFetch('/user',{auth:true}); const b=Number(ud?.user?.balanceSol??0); if(!isNaN(b)) AppState.user.balance=b; } catch(_){}
+  try {
+    const ud=await apiFetch('/user',{auth:true});
+    const b=Number(ud?.user?.balanceSol??0);
+    if(!isNaN(b)) AppState.user.balance=b;
+    const cb=Number(ud?.user?.chainBalanceSol??0);
+    if(!isNaN(cb)) AppState.user.chainBalance=cb;
+  } catch(_){}
   const paths=['/portfolio','/markets/portfolio'];
   let data=null;
   for(const p of paths){try{data=await apiFetch(p,{auth:true});break;}catch(e){if(e.status===404)continue;throw e;}}
@@ -1508,12 +1513,24 @@ async function authConnect(walletAddress) {
   const data=await apiFetch('/auth/connect',{method:'POST',body:{wallet:walletAddress}});
   const token=data?.token||data?.jwt||data?.accessToken||data?.data?.token;
   if(!token) throw new Error('Backend did not return JWT');
-  JWT_TOKEN=token; return JWT_TOKEN;
+  JWT_TOKEN=token;
+  try{
+    const u=data?.user||{};
+    const lam=u?.balanceLamports!=null?String(u.balanceLamports):null;
+    if(lam&&/^\d+$/.test(lam)) AppState.user.balance=lamportsToSolNumber(lam);
+    const clam=u?.chainBalanceLamports!=null?String(u.chainBalanceLamports):null;
+    if(clam&&/^\d+$/.test(clam)) AppState.user.chainBalance=lamportsToSolNumber(clam);
+  } catch(_){}
+  return JWT_TOKEN;
 }
 async function fetchAndStoreTokenPrices() {
   const ids=Object.values(COINGECKO_IDS).join(',');
   const prices=await fetchTokenPrices([ids]);
   AppState.tokenPrices=prices;
+  try {
+    const mints = (AppState.splTokens||[]).map(t=>t.mint);
+    AppState.tokenMintPrices = await fetchSolanaTokenPricesByMints(mints);
+  } catch(_) { AppState.tokenMintPrices = {}; }
   UI.renderTokenPrices();
 }
 
@@ -1545,10 +1562,9 @@ const Wallet = {
     document.getElementById('walletAvatarSm').style.display='block';
     document.getElementById('walletBtnText').textContent=fmtAddr(addr);
     document.getElementById('mobWIcon').textContent='✅';
-    document.getElementById('txBlock').style.display='block';
     document.getElementById('tokenPricesBlock').style.display='block';
 
-    try { AppState.user.balance=await getBalanceSol(); } catch(e){ console.error(e); AppState.user.balance=0; }
+    try { AppState.user.chainBalance=await getChainBalanceSol(); } catch(e){ console.error(e); AppState.user.chainBalance=0; }
 
     // Fetch SPL tokens
     try { AppState.splTokens=await getSPLTokens(); } catch(e){ AppState.splTokens=[]; }
@@ -1565,7 +1581,7 @@ const Wallet = {
     // Auto-refresh balance + prices every 15s
     setInterval(async()=>{
       if(!AppState.user.address) return;
-      try { AppState.user.balance=await getBalanceSol(); UI.renderStats(); UI.renderRightPanel(); } catch(_){}
+      try { AppState.user.chainBalance=await getChainBalanceSol(); UI.renderStats(); UI.renderRightPanel(); } catch(_){}
       try { await fetchAndStoreTokenPrices(); } catch(_){}
     }, 15000);
   },
@@ -1579,7 +1595,6 @@ const Wallet = {
     document.getElementById('walletAvatarSm').style.display='none';
     document.getElementById('walletBtnText').textContent='Connect Wallet';
     document.getElementById('mobWIcon').textContent='👤';
-    document.getElementById('txBlock').style.display='none';
     document.getElementById('tokenPricesBlock').style.display='none';
     UI.renderRightPanel(); UI.renderStats();
     Toast.show('👋','Disconnected','Wallet disconnected','info');
@@ -1659,7 +1674,6 @@ const BetModal = {
     document.getElementById('mcYes').className='choice-btn choice-yes';
     document.getElementById('mcNo').className='choice-btn choice-no';
     document.getElementById('txProgress').classList.remove('show');
-    document.getElementById('txHashDisplay').style.display='none';
     document.getElementById('confirmBetBtn').disabled=false;
     document.getElementById('confirmBetBtn').textContent='Confirm Bet';
     this.resetSteps();
@@ -1697,7 +1711,7 @@ const BetModal = {
     const amt=parseFloat(amtInput);
     if(!this.choice){ Toast.show('⚠️','Choose Side','Select YES or NO','error'); return; }
     if(!amtInput||isNaN(amt)||amt<=0){ Toast.show('⚠️','Invalid Amount','Enter a valid SOL amount','error'); return; }
-    if(amt>AppState.user.balance){ Toast.show('💸','Insufficient Balance','Not enough SOL in wallet','error'); return; }
+    if(amt>AppState.user.balance){ Toast.show('💸','Insufficient Balance','Not enough internal balance','error'); return; }
     const m=AppState.markets.find(x=>x.id===this.marketId); if(!m) return;
     const btn=document.getElementById('confirmBetBtn');
     btn.disabled=true; btn.textContent='Processing…';
@@ -1705,13 +1719,7 @@ const BetModal = {
     try {
       this.resetSteps();
       UI.setTxStep(1,'active');
-      const memo=`BET|${m.id}|${this.choice}|${amtInput}`;
-      const signature=await sendSol(amtInput,memo);
       UI.setTxStep(1,'done');
-      document.getElementById('txHashDisplay').textContent=`TX: ${signature}`;
-      document.getElementById('txHashDisplay').style.display='block';
-      AppState.addTransaction({ hash:signature, status:'confirmed', type:this.choice, market:m.title.slice(0,20), amount:amt, ts:Date.now() });
-      UI.renderTxList();
       UI.setTxStep(2,'active');
       const clientBetId=generateId();
       const payload={marketId:m.id,amount:amtInput,side:this.choice,clientBetId};
@@ -1728,11 +1736,11 @@ const BetModal = {
       if(!betOk) throw lastErr||new Error('Bet failed');
       UI.setTxStep(2,'done'); UI.setTxStep(3,'active');
       await Promise.all([refreshMarkets().catch(()=>{}), refreshPortfolio().catch(()=>{}), refreshActivity().catch(()=>{})]);
-      try{ AppState.user.balance=await getBalanceSol(); } catch(_){}
+      try{ AppState.user.chainBalance=await getChainBalanceSol(); } catch(_){}
       UI.renderStats(); UI.renderPortfolio(); UI.renderActivityFull();
       UI.setTxStep(3,'done');
       this.close();
-      Toast.show(this.choice==='YES'?'🟢':'🔴',`Bet Placed — ${this.choice}`,`${amt} SOL · TX: ${signature.slice(0,12)}…`,'success');
+      Toast.show(this.choice==='YES'?'🟢':'🔴',`Bet Placed — ${this.choice}`,`${amt} SOL`,'success');
     } catch(e){
       console.error(e); Toast.show('❌','Transaction Failed',e?.message||'Unknown error','error');
     } finally { btn.disabled=false; btn.textContent='Confirm Bet'; document.getElementById('txProgress').classList.remove('show'); }
@@ -1761,9 +1769,10 @@ const UI = {
     const avgTrend=ms.reduce((a,m)=>a+(m.trend||0),0)/Math.max(1,ms.length);
     document.getElementById('statVolChange').textContent=(avgTrend>=0?'↑ +':'↓ ')+Math.abs(avgTrend).toFixed(1)+'% today';
     if(AppState.user.address){
-      document.getElementById('statBalance').textContent=AppState.user.balance.toFixed(3)+' SOL';
+      animateNumber(document.getElementById('statBalance'), AppState.user.balance, { decimals: 3, suffix: ' SOL' });
       const solPrice=AppState.tokenPrices?.['solana']?.usd||145;
-      document.getElementById('statBalSub').textContent='≈ $'+(AppState.user.balance*solPrice).toFixed(0);
+      const chain = AppState.user.chainBalance || 0;
+      document.getElementById('statBalSub').textContent=`Internal ≈ $${(AppState.user.balance*solPrice).toFixed(0)} · On-chain ${chain.toFixed(3)} SOL`;
       document.getElementById('statBalSub').className='sc-sub up';
     } else { document.getElementById('statBalance').textContent='—'; document.getElementById('statBalSub').textContent='Connect wallet'; document.getElementById('statBalSub').className='sc-sub'; }
   },
@@ -1859,7 +1868,8 @@ const UI = {
     const u=AppState.user;
     const solPrice=AppState.tokenPrices?.['solana']?.usd||145;
     const solChange=AppState.tokenPrices?.['solana']?.usd_24h_change||0;
-    const totalUSD=(u.balance*solPrice);
+    const internalUSD=(u.balance*solPrice);
+    const chainUSD=(u.chainBalance*solPrice);
     el.innerHTML=`
       <div class="rp-wallet-card">
         <div class="rp-avatar-row">
@@ -1870,12 +1880,24 @@ const UI = {
           </div>
         </div>
         <div style="margin-bottom:8px">
-          <div style="font-size:10px;font-family:var(--font-mono);color:var(--text-dim);margin-bottom:4px;letter-spacing:0.08em">PORTFOLIO VALUE</div>
-          <div style="font-size:22px;font-weight:800;font-family:var(--font-display)">$${totalUSD.toFixed(2)}</div>
+          <div style="font-size:10px;font-family:var(--font-mono);color:var(--text-dim);margin-bottom:6px;letter-spacing:0.08em">BALANCES</div>
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:12px">
+            <div>
+              <div style="font-size:10px;font-family:var(--font-mono);color:var(--text-dim);letter-spacing:0.08em">INTERNAL</div>
+              <div style="font-size:20px;font-weight:900;font-family:var(--font-display);color:var(--gold)">${u.balance.toFixed(4)} SOL</div>
+              <div style="font-size:11px;font-family:var(--font-mono);color:var(--text-secondary)">≈ $${internalUSD.toFixed(2)}</div>
+            </div>
+            <div style="text-align:right">
+              <div style="font-size:10px;font-family:var(--font-mono);color:var(--text-dim);letter-spacing:0.08em">ON-CHAIN</div>
+              <div style="font-size:16px;font-weight:800;font-family:var(--font-display)">${u.chainBalance.toFixed(4)} SOL</div>
+              <div style="font-size:11px;font-family:var(--font-mono);color:var(--text-secondary)">≈ $${chainUSD.toFixed(2)}</div>
+            </div>
+          </div>
           <div style="font-size:11px;font-family:var(--font-mono);color:${solChange>=0?'var(--green)':'var(--red)'}">${solChange>=0?'↑':'↓'} ${Math.abs(solChange).toFixed(2)}% (SOL/USD)</div>
         </div>
         <div class="bal-grid">
-          <div class="bal-item"><div class="bi-label">SOL BALANCE</div><div class="bi-value" style="color:var(--gold)">${u.balance.toFixed(4)}</div></div>
+          <div class="bal-item"><div class="bi-label">INTERNAL</div><div class="bi-value" style="color:var(--gold)">${u.balance.toFixed(4)}</div></div>
+          <div class="bal-item"><div class="bi-label">ON-CHAIN</div><div class="bi-value">${u.chainBalance.toFixed(4)}</div></div>
           <div class="bal-item"><div class="bi-label">WAGERED</div><div class="bi-value" style="color:var(--purple-bright)">${u.totalWagered.toFixed(2)}</div></div>
           <div class="bal-item"><div class="bi-label">P&L</div><div class="bi-value" style="color:${u.totalPnl>=0?'var(--green)':'var(--red)'}">${u.totalPnl>=0?'+':''}${u.totalPnl.toFixed(2)}</div></div>
           <div class="bal-item"><div class="bi-label">WIN RATE</div><div class="bi-value" style="color:var(--green)">${u.winRate&&u.winRate>0?u.winRate.toFixed(0)+'%':'—'}</div></div>
@@ -1908,20 +1930,6 @@ const UI = {
           </div>
         </div>`;
     }).join('');
-  },
-  renderTxList() {
-    const el=document.getElementById('txList'); if(!el) return;
-    const txs=AppState.wallet.transactions.slice(0,5);
-    if(!txs.length){ el.innerHTML='<div style="font-size:10px;font-family:var(--font-mono);color:var(--text-dim)">No transactions yet</div>'; return; }
-    el.innerHTML=txs.map(tx=>`
-      <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-1)">
-        <div style="width:6px;height:6px;border-radius:50%;background:${tx.status==='confirmed'?'var(--green)':tx.status==='pending'?'var(--gold)':'var(--red)'};flex-shrink:0"></div>
-        <div style="flex:1;min-width:0">
-          <div style="font-family:var(--font-mono);font-size:10px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${tx.hash.slice(0,22)}…</div>
-          <div style="font-size:9px;font-family:var(--font-mono);color:var(--text-dim)">${tx.amount} SOL · ${tx.market.slice(0,14)}…</div>
-        </div>
-        <span style="font-size:9px;font-family:var(--font-mono);padding:1px 5px;border-radius:3px;background:${tx.type==='YES'?'var(--green-dim)':'var(--red-dim)'};color:${tx.type==='YES'?'var(--green)':'var(--red)'}">${tx.type}</span>
-      </div>`).join('');
   },
   renderOrderBook(market) {
     const el=document.getElementById('orderBook'); if(!el) return;
@@ -1981,7 +1989,16 @@ const UI = {
     const totalWagered=mine.reduce((a,b)=>a+b.amount,0);
     const risk=Math.min(100,(totalWagered/(u.balance+totalWagered))*100)||0;
     const solPrice=AppState.tokenPrices?.['solana']?.usd||145;
-    const totalPortfolioUSD=(u.balance*solPrice);
+    const internalUSD=(u.balance*solPrice);
+    const chainSolUSD=(u.chainBalance*solPrice);
+    const tokenPricesByMint=AppState.tokenMintPrices||{};
+    const splValueUSD=(AppState.splTokens||[]).reduce((acc,t)=>{
+      const p=tokenPricesByMint?.[String(t.mint||'').toLowerCase()]?.usd;
+      const px=Number(p);
+      if(!Number.isFinite(px)||px<=0) return acc;
+      return acc + (Number(t.amount||0)*px);
+    },0);
+    const totalPortfolioUSD=(internalUSD + chainSolUSD + splValueUSD);
     const solChange=AppState.tokenPrices?.['solana']?.usd_24h_change||0;
 
     el.innerHTML=`
@@ -1999,9 +2016,15 @@ const UI = {
             <div class="hero-chain-badge">⬡ Solana</div>
           </div>
           <div class="hero-balance-area">
-            <div class="hero-balance-label">Total Portfolio Value</div>
+            <div class="hero-balance-label">Total Value (Internal + Wallet)</div>
             <div class="hero-balance-usd" style="background:linear-gradient(135deg,var(--green),var(--purple-bright));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">$${totalPortfolioUSD.toFixed(2)}</div>
-            <div class="hero-balance-sol">◎ ${u.balance.toFixed(4)} SOL &nbsp;·&nbsp; <span style="color:${solChange>=0?'var(--green)':'var(--red)'}">${solChange>=0?'↑':'↓'} ${Math.abs(solChange).toFixed(2)}% 24h</span></div>
+            <div class="hero-balance-sol">
+              <span style="color:var(--gold);font-weight:700">Internal:</span> ◎ ${u.balance.toFixed(4)} SOL
+              &nbsp;·&nbsp;
+              <span style="color:var(--text-secondary)"><span style="font-weight:700">Wallet:</span> ◎ ${u.chainBalance.toFixed(4)} SOL</span>
+              &nbsp;·&nbsp;
+              <span style="color:${solChange>=0?'var(--green)':'var(--red)'}">${solChange>=0?'↑':'↓'} ${Math.abs(solChange).toFixed(2)}% 24h</span>
+            </div>
           </div>
           <div class="hero-stats">
             <div class="hero-stat">
@@ -2042,8 +2065,8 @@ const UI = {
                 <div><div class="token-name">${t.symbol}</div><div class="token-symbol">${t.mint.slice(0,8)}…</div></div>
               </div></td>
               <td class="token-amount">${t.amount.toFixed(4)}</td>
-              <td class="token-price">—</td>
-              <td class="token-value">—</td>
+              <td class="token-price">${(tokenPricesByMint?.[String(t.mint||'').toLowerCase()]?.usd!=null)?('$'+Number(tokenPricesByMint[String(t.mint||'').toLowerCase()]?.usd||0).toFixed(4)):'—'}</td>
+              <td class="token-value">${(tokenPricesByMint?.[String(t.mint||'').toLowerCase()]?.usd!=null)?('$'+(Number(t.amount||0)*Number(tokenPricesByMint[String(t.mint||'').toLowerCase()]?.usd||0)).toFixed(2)):'—'}</td>
             </tr>`).join('')}
           </tbody>
         </table>

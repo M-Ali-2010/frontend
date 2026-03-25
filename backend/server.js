@@ -53,7 +53,10 @@ const platformPk = new PublicKey(process.env.PLATFORM_WALLET_ADDRESS);
 async function startDepositWatcher() {
   console.log('[deposit] watcher started');
 
+  let running = false;
   setInterval(async () => {
+    if (running) return;
+    running = true;
     try {
       const sigs = await connection.getSignaturesForAddress(platformPk, { limit: 20 });
 
@@ -81,18 +84,35 @@ async function startDepositWatcher() {
         // 🔥 безопаснее: sender = fee payer
         const sender = keys[0];
 
-        // --- SAVE ---
-        await Deposit.create({
-          signature: s.signature,
-          senderWallet: sender,
-          amountLamports: delta.toString(),
-        });
+        const session = await mongoose.startSession();
+        try {
+          await session.withTransaction(async () => {
+            await Deposit.create([{
+              signature: s.signature,
+              senderWallet: sender,
+              platformWallet: platformPk.toString(),
+              amountLamports: delta.toString(),
+              blockTime: s.blockTime ? new Date(s.blockTime * 1000) : null,
+            }], { session });
 
-        await User.updateOne(
-          { wallet: sender },
-          { $inc: { balanceLamports: delta.toString() } },
-          { upsert: true }
-        );
+            const user = await User.findOne({ wallet: sender }).session(session);
+            if (!user) {
+              await User.create([{
+                wallet: sender,
+                balanceLamports: delta.toString(),
+                chainBalanceLamports: '0',
+                chainBalanceUpdatedAt: null,
+                roles: ['user'],
+              }], { session });
+            } else {
+              const prev = BigInt(user.balanceLamports || '0');
+              user.balanceLamports = (prev + delta).toString();
+              await user.save({ session });
+            }
+          });
+        } finally {
+          await session.endSession();
+        }
 
         io.emit('deposit_received', {
           wallet: sender,
@@ -104,6 +124,8 @@ async function startDepositWatcher() {
 
     } catch (e) {
       console.error('[deposit error]', e.message);
+    } finally {
+      running = false;
     }
   }, 5000);
 }
