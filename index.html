@@ -1437,7 +1437,6 @@ const CONFIG = {
 /* ═══════════════════════════════════════════════════════════
    SOLANA SETUP — display-only RPC connection
 ═══════════════════════════════════════════════════════════ */
-const solanaWeb3 = window.solanaWeb3;
 
 // connection is used ONLY for fetching display balance — not for sending transactions.
 // All transaction construction and fee payment is handled by the backend.
@@ -1445,7 +1444,7 @@ let _connection = null;
 function getConnection() {
   if (!solanaWeb3) return null;
   if (!_connection) {
-    _connection = new solanaWeb3.Connection(CONFIG.RPC_ENDPOINT, 'confirmed');
+    _connection = new window.solanaWeb3.Connection(CONFIG.RPC_ENDPOINT, 'confirmed');
   }
   return _connection;
 }
@@ -1796,7 +1795,7 @@ const Wallet = {
     const conn = getConnection();
     if (!conn || !solanaWeb3 || !AppState.user.address) return;
     try {
-      const pk = new solanaWeb3.PublicKey(AppState.user.address);
+      const pk = new window.solanaWeb3.PublicKey(AppState.user.address);
       const lamports = await conn.getBalance(pk, 'confirmed');
       // Only update UI display — backend balance is authoritative for bet validation
       const solBalance = Number(lamports) / 1e9;
@@ -1870,7 +1869,7 @@ async function createAndSignBet({ marketId, amount, side }) {
 
   // Decode base64 → Uint8Array → Transaction
   const txBytes = Uint8Array.from(atob(txBase64), c => c.charCodeAt(0));
-  const transaction = solanaWeb3.Transaction.from(txBytes);
+  const transaction = window.solanaWeb3.Transaction.from(txBytes);
 
   // Step 2: user signs with Phantom (throws with code 4001 on reject)
   const signedTx = await Wallet.phantom.signTransaction(transaction);
