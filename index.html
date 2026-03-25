@@ -618,7 +618,7 @@ a{color:inherit;text-decoration:none}
 ═══════════════════════════════════════════ */
 
 /* ─── CONSTANTS ─── */
-const RPC_ENDPOINT = 'https://api.mainnet-beta.solana.com';
+const RPC_ENDPOINT = 'https://mainnet.helius-rpc.com/?api-key=814fed2a-966d-4f5c-82e6-e7d45a31cda0';
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const TOKEN_PROGRAM_ID = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 
@@ -672,19 +672,58 @@ const AppState = {
 /* ─── RPC CLIENT (uses fetch, no heavy SDK needed) ─── */
 const RPC = {
   async call(method, params = []) {
-    const res = await fetch(RPC_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-    });
-    const json = await res.json();
-    if (json.error) throw new Error(json.error.message || 'RPC error');
-    return json.result;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+
+    try {
+      const res = await fetch(RPC_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: Date.now(),
+          method,
+          params
+        }),
+        signal: controller.signal
+      });
+
+      if (!res.ok) throw new Error('RPC HTTP error');
+
+      const json = await res.json();
+
+      if (json.error) {
+        throw new Error(json.error.message || 'RPC error');
+      }
+
+      return json.result;
+
+    } catch (e) {
+      console.warn('RPC retry...', e.message);
+
+      // 🔁 retry (очень важно)
+      const retry = await fetch(RPC_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: Date.now(),
+          method,
+          params
+        })
+      });
+
+      const json = await retry.json();
+      return json.result;
+
+    } finally {
+      clearTimeout(timeout);
+    }
   },
 
   async getBalance(pubkey) {
     const result = await this.call('getBalance', [pubkey, { commitment: 'confirmed' }]);
-    return result.value / LAMPORTS_PER_SOL;
+    return (result?.value || 0) / LAMPORTS_PER_SOL;
   },
 
   async getParsedTokenAccounts(pubkey) {
@@ -758,11 +797,15 @@ const PriceService = {
 
 /* ─── WALLET SERVICE ─── */
 const WalletService = {
-  get provider() { return window.solana; },
+get provider() { return window.phantom?.solana || window.solana; },
 
   async toggle() {
     if (AppState.wallet.connected) {
       this.disconnect();
+      if (this._interval) {
+  clearInterval(this._interval);
+  this._interval = null;
+}
     } else {
       await this.connect();
     }
@@ -794,6 +837,10 @@ const WalletService = {
 
       // Sync all data in parallel
       await this.syncAll();
+      // авто обновление каждые 10 сек
+this._interval = setInterval(() => {
+  this.syncAll().catch(()=>{});
+}, 10000);
       UI.renderRightPanel();
 
     } catch (e) {
